@@ -1,0 +1,230 @@
+Program.Sub.ScreenSU.Start
+Program.Sub.ScreenSU.End
+
+Program.Sub.Preflight.Start
+
+Variable.Global.fCount.Declare(Float,0)
+Variable.Global.sCount.Declare(String,"0")
+Variable.Global.sDate.Declare(String)
+Variable.UDT.UOrder.Define("Order_No",String,ORDER_NO)
+Variable.UDT.UOrder.Define("Order_Rec",String,ORDER_REC)
+Variable.UDT.UOrder.Define("Description",String,Order_Desc)
+Variable.UDT.UOrder.Define("Terminal",String)
+Variable.UDT.UOrder.Define("Qty_Ordered",Float)
+Variable.UDT.UOrder.Define("TodayShipped",Float)
+Variable.UDT.UOrder.Define("Part",String,PART)
+Variable.uGlobal.uOrder.Declare("UOrder")
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'custom work for display design group.
+' use task scheduler
+' grab data from items being shipped and add to custom sql table, run report.
+'For Quote 5826 an Edit was for Display Design Group by SKT that:
+'Altered on 6/11/2014 so that it will only pull parts that have a product_line of FG
+
+F.Intrinsic.Control.SetErrorHandler("Main_Err")
+F.Intrinsic.Control.ClearErrors
+
+V.Local.sError.Declare(String)
+V.Local.sSQL.Declare(String)
+V.Local.sTodayShipped.Declare(String)
+V.Local.i.Declare(Long)
+V.Local.sSOLine.Declare(String)
+
+F.ODBC.Connection!con.OpenConnection(V.Ambient.PDSN,V.Ambient.PUser,V.Ambient.PPass)
+
+F.Intrinsic.String.Concat("Delete GCG_3968_Daily_Ship Where Terminal = '",V.Caller.Terminal,"'",V.Local.sSQL)
+F.ODBC.Connection!con.Execute(V.Local.sSQL)
+
+V.uGlobal.uOrder.Redim(-1,-1)
+'grabbing all shipment records for today
+F.Intrinsic.String.Format(V.Ambient.Date,"YYYY-MM-DD",V.Global.sDate)
+'V.Global.sDate.Set("2013-01-22")
+'Altered for Quote 5826 added to query " add Product_Line = 'FG'"
+F.Intrinsic.String.Concat("Select  Order_No, Order_Rec,Order_Desc, Part From V_SHIPMENT_LINES Where DATE_SHIP = '",V.Global.sDate,"'  and Product_Line = 'FG' Order by Order_No,Order_Rec",V.Local.sSQL)
+F.ODBC.Connection!con.OpenRecordsetRO("rst",V.Local.sSQL)
+F.Intrinsic.Control.If(V.ODBC.con!rst.EOF,=,False)
+	F.Intrinsic.Variable.LoadUDTFromRecordset("con","rst","v.uGlobal.uOrder",True)
+F.Intrinsic.Control.EndIf
+F.ODBC.con!rst.Close
+
+'delete duplicate (order suffix) to get the correct qty shipped for the day.
+F.Intrinsic.Variable.UDTMultiFlagDuplicates(V.uGlobal.uOrder!Order_No,V.uGlobal.uOrder!Order_Rec)
+F.Intrinsic.Variable.UDTDeleteFlagged(V.uGlobal.uOrder)
+F.Intrinsic.Variable.UDTMultiQuickSort(V.uGlobal.uOrder!Order_No,False,V.uGlobal.uOrder!Order_Rec,False)
+
+'find the qty shipped for multiple order suffix with same order#, order line#.  Grab the ty ordered from job header
+F.Intrinsic.Control.For(V.Local.i,V.uGlobal.uOrder.LBound,V.uGlobal.uOrder.UBound,1)
+	V.Local.sTodayShipped.Set(0)
+	F.Intrinsic.String.Concat("Select * From V_SHIPMENT_LINES Where DATE_SHIP = '",V.Global.sDate,"' and Order_No = '",V.uGlobal.uOrder(v.Local.i)!Order_No,"' and Order_Rec = '",V.uGlobal.uOrder(v.Local.i)!Order_Rec,"' and Part = '",V.uGlobal.uOrder(v.Local.i)!Part,"' Order by Order_No,Order_Rec",V.Local.sSQL)
+	F.ODBC.Connection!con.OpenRecordsetRO("rst",V.Local.sSQL)
+	F.Intrinsic.Control.If(V.ODBC.con!rst.EOF,=,False)
+		'terminal
+		V.uGlobal.uOrder(v.Local.i)!Terminal.Set(V.Caller.Terminal)
+		F.Intrinsic.String.Left(V.uGlobal.uOrder(v.Local.i)!Order_Rec,3,V.Local.sSOLine)
+		F.Intrinsic.String.Concat("Select * From V_JOB_HEADER Where Sales_Order = '",V.uGlobal.uOrder(v.Local.i)!Order_No,"' and Sales_Order_Line = '",V.Local.sSOLine,"' and Part = '",V.uGlobal.uOrder(v.Local.i)!Part,"'",V.Local.sSQL)
+		F.ODBC.Connection!con.OpenRecordsetRO("rstHeader",V.Local.sSQL)
+		F.Intrinsic.Control.If(V.ODBC.con!rstHeader.EOF,=,False)
+			'qty ordered
+			V.uGlobal.uOrder(v.Local.i)!Qty_Ordered.Set(V.ODBC.con!rstHeader.FieldValTrim!QTY_ORDER)
+		F.Intrinsic.Control.Else
+			V.uGlobal.uOrder(v.Local.i)!Qty_Ordered.Set(0)
+		F.Intrinsic.Control.EndIf
+		F.ODBC.con!rstHeader.Close
+		F.Intrinsic.Control.DoUntil(V.ODBC.con!rst.EOF,=,True)
+			'sum of qty shipped per order# and  Order line#
+			F.Intrinsic.Math.Add(V.Local.sTodayShipped,V.ODBC.con!rst.FieldValTrim!QTY_SHIPPED,V.Local.sTodayShipped)
+			'total qty shipped of all orders for that day. Goes in header of report.
+			F.Intrinsic.Math.Add(V.Global.sCount,V.ODBC.con!rst.FieldValTrim!QTY_SHIPPED,V.Global.sCount)
+			F.ODBC.con!rst.MoveNext
+		F.Intrinsic.Control.Loop
+		V.uGlobal.uOrder(v.Local.i)!TodayShipped.Set(V.Local.sTodayShipped)
+	F.Intrinsic.Control.EndIf
+	F.ODBC.con!rst.Close
+F.Intrinsic.Control.Next(V.Local.i)
+
+'save records to custom table
+F.Intrinsic.String.Concat("Select * From GCG_3968_Daily_Ship Where Terminal = '",V.Caller.Terminal,"'",V.Local.sSQL)
+F.ODBC.Connection!con.OpenRecordsetRW("rstWrite",V.Local.sSQL)
+F.Intrinsic.Control.If(V.ODBC.con!rstWrite.EOF,=,True)
+	F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uOrder!Terminal,"Terminal")
+	F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uOrder!Order_Rec,"Order_Line")
+	F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uOrder!Description,"Description")
+	F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uOrder!TodayShipped,"Qty_Shipped")
+	F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uOrder!Qty_Ordered,"Qty_Ordered")
+	F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uOrder!Part,"")
+	F.Intrinsic.Variable.SaveUDTToRecordset("con","rstWrite","v.uGlobal.uOrder")
+F.Intrinsic.Control.EndIf
+F.ODBC.con!rstWrite.Close
+
+
+F.Intrinsic.Control.CallSub(Previousship)
+F.Intrinsic.Control.CallSub(Printreport)
+F.Intrinsic.Control.CallSub(Unload)
+
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("Main_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Project: GCG_3968_Daily_Shipping.gas",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.CallSub(Unload)
+Function.Intrinsic.Control.EndIf
+
+
+Program.Sub.Main.End
+
+Program.Sub.Unload.Start
+F.ODBC.Connection!con.Close
+F.Intrinsic.Control.End
+
+Program.Sub.Unload.End
+
+Program.Sub.PrintReport.Start
+F.Intrinsic.Control.SetErrorHandler("PrintReport_Err")
+F.Intrinsic.Control.ClearErrors
+
+V.Local.sError.Declare(String)
+V.Local.sParam.Declare(String)
+V.Local.sParamVal.Declare(String)
+V.Local.iReport.Declare(Long)
+V.Local.sReportName.Declare(String)
+V.Local.sAttach.Declare(String)
+V.Local.sMember.Declare(String)
+V.Local.i.Declare(Long)
+V.Local.sFile.Declare(String)
+V.Local.bExists.Declare(Boolean,False)
+V.Local.sText.Declare(String)
+V.Local.sSubject.Declare(String)
+V.Local.sBody.Declare(String)
+V.Local.sRcptName.Declare(String)
+
+F.Intrinsic.String.Concat(V.Caller.FilesDir,"\","DailyShippingReport",".pdf",V.Local.sAttach)
+F.Intrinsic.File.Exists(V.Local.sAttach,V.Local.bExists)
+F.Intrinsic.Control.If(V.Local.bExists,=,True)
+	F.Intrinsic.File.DeleteFile(V.Local.sAttach)
+F.Intrinsic.Control.EndIf
+
+V.Local.sParam.Set("Terminal*!*ShipTotal")
+F.Intrinsic.String.Concat(V.Caller.Terminal,"*!*",V.Global.sCount,V.Local.sParamVal)
+F.Intrinsic.String.Split(V.Local.sParam,"*!*",V.Local.sParam)
+F.Intrinsic.String.Split(V.Local.sParamVal,"*!*",V.Local.sParamVal)
+F.Global.BI.GetIDFromName("GCG_3968_Daily_Shipping.rpt",V.Local.iReport)
+F.Global.BI.SaveReport(V.Local.iReport,1,V.Local.sParam,V.Local.sParamVal,V.Local.sAttach)
+
+F.Intrinsic.String.Concat(V.Caller.FilesDir,"\Body.txt",V.Local.sFile)
+
+F.Intrinsic.File.File2String(V.Local.sFile,V.Local.sText)
+F.Intrinsic.String.Split(V.Local.sText,"*!*",V.Local.sText)
+V.Local.sSubject.Set(V.Local.sText(0))
+V.Local.sBody.Set(V.Local.sText(1))
+V.Local.sRcptName.Set("")
+
+F.Global.Security.GetGroupEmails("SHIPPING","DDG",V.Local.sMember)
+F.Intrinsic.String.Split(V.Local.sMember,"*!*",V.Local.sMember)
+F.Intrinsic.Control.For(V.Local.i,0,V.Local.sMember.UBound,1)
+	F.Global.Messaging.CreateEMMessage(V.Local.sMember(v.Local.i),"Shipping Team","NoReply@DesignDisplayGroup.com","No Reply",V.Local.sSubject,V.Local.sBody,V.Local.sAttach,False)
+	F.Intrinsic.UI.Sleep(1)
+F.Intrinsic.Control.Next(V.Local.i)
+
+
+
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("PrintReport_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Project: GCG_3968_Daily_Shipping.gas",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.CallSub(Unload)
+Function.Intrinsic.Control.EndIf
+
+
+Program.Sub.PrintReport.End
+
+Program.Sub.PreviousShip.Start
+F.Intrinsic.Control.SetErrorHandler("PreviousShip_Err")
+F.Intrinsic.Control.ClearErrors
+
+V.Local.sError.Declare(String)
+V.Local.sSQL.Declare(String)
+V.Local.sDate.Declare(String)
+V.Local.sPrevShip.Declare(String)
+V.Local.i.Declare(Long)
+
+'find all prevous qty shipped from shipment lines table.
+F.Intrinsic.String.Concat("Select * From GCG_3968_Daily_Ship Where Terminal = '",V.Caller.Terminal,"' Order By Order_No,Order_Line",V.Local.sSQL)
+F.ODBC.Connection!con.OpenRecordsetRW("rstWrite",V.Local.sSQL)
+F.Intrinsic.Control.If(V.ODBC.con!rstWrite.EOF,=,False)
+	F.Intrinsic.Control.DoUntil(V.ODBC.con!rstWrite.EOF,=,True)
+		V.Local.sPrevShip.Set(0)
+		F.Intrinsic.String.Concat("Select * From V_SHIPMENT_LINES Where DATE_SHIP < '",V.Global.sDate,"' and Order_No = '",V.ODBC.con!rstWrite.FieldValTrim!ORDER_NO,"' and Order_Rec = '",V.ODBC.con!rstWrite.FieldValTrim!ORDER_LINE,"'",V.Local.sSQL)
+		F.ODBC.Connection!con.OpenRecordsetRO("rst",V.Local.sSQL)
+		F.Intrinsic.Control.If(V.ODBC.con!rst.EOF,=,False)
+			F.Intrinsic.Control.DoUntil(V.ODBC.con!rst.EOF,=,True)
+				F.Intrinsic.Math.Add(V.Local.sPrevShip,V.ODBC.con!rst.FieldValTrim!QTY_SHIPPED,V.Local.sPrevShip)
+				F.ODBC.con!rst.MoveNext
+			F.Intrinsic.Control.Loop
+		F.Intrinsic.Control.EndIf
+		F.ODBC.con!rst.Close
+		F.ODBC.con!rstWrite.Set!PREV_SHIPPED(V.Local.sPrevShip)
+		F.ODBC.con!rstWrite.Update
+		F.ODBC.con!rstWrite.MoveNext
+	F.Intrinsic.Control.Loop
+F.Intrinsic.Control.EndIf
+F.ODBC.con!rstWrite.Close
+
+
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("PreviousShip_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Project: GCG_3968_Daily_Shipping.gas",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.UI.Msgbox(V.Local.sError)
+	F.Intrinsic.Control.CallSub(Unload)
+Function.Intrinsic.Control.EndIf
+
+
+Program.Sub.PreviousShip.End
+
+
